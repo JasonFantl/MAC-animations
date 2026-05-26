@@ -27,25 +27,41 @@ const STATION_CFGS = [
 const COMM_RADIUS = 160;
 
 // Timeline
-const TL_WIN = 20;
-const TL_Y   = 273;
-const TL_ROW = 28;
-const TL_GAP = 9;
-const TL_LX  = 50;
-const TL_W   = 460;
+const TL_WIN   = 20;
+const TL_Y     = 257;   // top of timeline panel (annotation lane starts here)
+const TL_ANN_H = 16;    // height of annotation lane above the rows
+const TL_ROW   = 28;
+const TL_GAP   = 9;
+const TL_LX    = 50;
+const TL_W     = 460;
 
 const MESSAGE_SCHEDULE = [
   { time: 1.0,  stationId: 0 },
-  { time: 6.0,  stationId: 1 },
-  { time: 10.5,  stationId: 2 },
-  { time: 11.9,  stationId: 1 },
-  { time: 22.0, stationId: 2 },
-  { time: 24, stationId: 0 },
-  { time: 32.9,  stationId: 1 },
-  { time: 33.0, stationId: 0 },
-  { time: 34, stationId: 2 },
+
+  { time: 7.0,  stationId: 1 },
+  
+  { time: 13,  stationId: 2 },
+  { time: 14.9,  stationId: 1 },
+
+  { time: 23.0, stationId: 0 },
+  { time: 23.5, stationId: 2 },
+  
+  { time: 33.0,  stationId: 1 },
+  { time: 33.1, stationId: 0 },
+  { time: 33.2, stationId: 2 },
 ];
-const SCHEDULE_PERIOD = 30;
+const SCHEDULE_PERIOD = 50;
+
+const ANNOTATIONS = [
+  { label: 'Hidden node (A)', start: 0.9, end: 5 },
+  { label: 'Neighbor node (B)', start: 6.9, end: 11 },
+  { label: 'Both neighbors (B, C)', start: 12.9, end: 21 },
+  { label: 'Hidden and neighbor (A, B)', start: 22.9, end: 31 },
+
+  { label: 'All (A, B, C) colliding', start: 32.9, end: 46 },
+
+  // { label: 'Hidden terminal collision', start: 32.9, end: 35.5 },
+];
 
 const TX_COL  = [100, 160, 255]; // data — blue
 const RTS_COL = [180, 100, 220]; // RTS  — purple
@@ -669,7 +685,7 @@ function drawTimeline() {
   let tEnd   = max(TL_WIN, globalTime);
   let tStart = tEnd - TL_WIN;
   let rows   = stations.length + 1;
-  let totalH = rows * (TL_ROW + TL_GAP) + 18;
+  let totalH = TL_ANN_H + rows * (TL_ROW + TL_GAP) + 18;
 
   push();
   fill(245); noStroke();
@@ -685,9 +701,35 @@ function drawTimeline() {
   let [rr, rg, rb] = RTS_COL;
   let [cr, cg, cb] = CTS_COL;
 
+  // Annotation lane
+  let annLineY = TL_Y + 8;  // leave gap above rows
+  let tickH = 4;
+  for (let ann of ANNOTATIONS) {
+    if (globalTime < ann.start) continue;          // don't show before time is reached
+    if (ann.end < tStart || ann.start > tEnd) continue;
+    let visEnd = min(ann.end, globalTime);          // line only extends to "now"
+    let ax1    = map(max(ann.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax2    = map(min(visEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax1raw = map(ann.start, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax2raw = map(ann.end,   tStart, tEnd, TL_LX, TL_LX + TL_W);
+    stroke(0); strokeWeight(1); noFill();
+    line(ax1, annLineY, ax2, annLineY);
+    if (ann.start >= tStart)               { line(ax1, annLineY - tickH, ax1, annLineY + tickH); }
+    if (ann.end <= globalTime && visEnd <= tEnd) { line(ax2, annLineY - tickH, ax2, annLineY + tickH); }
+    // Label left-aligned at annotation start, clipped at "now" so it grows with the timeline
+    let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(TL_LX, TL_Y - 12, nowX - TL_LX, TL_ANN_H + 12);
+    drawingContext.clip();
+    fill(0); noStroke(); textAlign(LEFT, BOTTOM);
+    text(ann.label, ax1raw + 2, annLineY - 2);
+    drawingContext.restore();
+  }
+
   for (let i = 0; i < stations.length; i++) {
     let s  = stations[i];
-    let ry = TL_Y + i * (TL_ROW + TL_GAP);
+    let ry = TL_Y + TL_ANN_H + i * (TL_ROW + TL_GAP);
     let h2 = TL_ROW / 2;
     let y2 = ry + h2 / 2;
 
@@ -774,7 +816,7 @@ function drawTimeline() {
   }
 
   // Router row
-  let bry = TL_Y + stations.length * (TL_ROW + TL_GAP);
+  let bry = TL_Y + TL_ANN_H + stations.length * (TL_ROW + TL_GAP);
   fill(195); noStroke(); rect(TL_LX, bry, TL_W, TL_ROW);
 
   // Incoming RTS/data shown on router row (half height)
@@ -805,10 +847,11 @@ function drawTimeline() {
   fill(50); noStroke(); textAlign(RIGHT, CENTER);
   text('Router', TL_LX - 4, bry + TL_ROW / 2);
 
+
   // Now-marker
   let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
   stroke(140); strokeWeight(1);
-  line(nowX, TL_Y, nowX, bry + TL_ROW);
+  line(nowX, TL_Y + TL_ANN_H, nowX, bry + TL_ROW);
 
   // Time axis
   let axisY = bry + TL_ROW + 12;
