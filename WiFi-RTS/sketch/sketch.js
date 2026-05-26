@@ -59,8 +59,6 @@ const ANNOTATIONS = [
   { label: 'Hidden and neighbor (A, B)', start: 22.9, end: 31 },
 
   { label: 'All (A, B, C) colliding', start: 32.9, end: 46 },
-
-  // { label: 'Hidden terminal collision', start: 32.9, end: 35.5 },
 ];
 
 const TX_COL  = [100, 160, 255]; // data — blue
@@ -105,7 +103,7 @@ class Network {
   }
 
   prune(time) {
-    this.transmissions = this.transmissions.filter(t => t.endTime > time - 0.5);
+    this.transmissions = this.transmissions.filter(t => t.endTime > time - DATA_DURATION - 1);
   }
 }
 
@@ -545,7 +543,7 @@ function setup() {
   createCanvas(520, 440);
   frameRate(30);
   initSim();
-  // P5Capture.getInstance().start({ format: 'webm' });
+  P5Capture.getInstance().start({ format: 'webm' });
 }
 
 function keyPressed() {

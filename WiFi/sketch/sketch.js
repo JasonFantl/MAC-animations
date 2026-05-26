@@ -1,54 +1,64 @@
-// WiFi (Pure ALOHA) simulation
-// Router (access point) sits at the centre of the canvas.
-// Three computers form an equilateral triangle around it.
-
-const PACKET_SPEED     = 110;   // px/s
-const ACK_DELAY        = 0.3;   // s — router waits before sending ACK
-const RAND_SEED   = 42;
+// WiFi (CSMA/CA) simulation
+const SIFS       = 0.1;   // s — Short Inter-Frame Space
+const ACK_DELAY  = 0.4;   // s — total: SIFS (0.1) + ACK frame (0.3)
+const RAND_SEED  = 41;
 
 // CSMA/CA timing
-const DIFS        = 0.4;   // s — minimum idle time before starting backoff
-const SLOT_TIME   = 0.15;  // s — duration of one backoff slot
-const CW_MIN      = 7;     // initial contention window: draw from [0, CW_MIN] slots
-const CW_MAX      = 63;    // maximum contention window after repeated collisions
+const DIFS       = 0.4;
+const SLOT_TIME  = 0.15;
+const CW_MIN     = 7;
+const CW_MAX     = 63;
 
-// Layout
-//   A (top):   (260,  60) — 125 px from router
-//   B (bot-L): (205, 285) — 114 px from router, 110 px from C
-//   C (bot-R): (315, 285) — 114 px from router, 110 px from B
-//   A↔B = A↔C ≈ 232 px  →  outside COMM_RADIUS, so A is a hidden node to B/C
-const BASE_POS = { x: 260, y: 185 };
+// Transmission timing
+const TX_DURATION = 1.8;   // s — data frame on air
+
+const BASE_ID = -1;
+
+// Layout — same topology as WiFi-RTS (A hidden from B and C)
+const BASE_POS = { x: 320, y: 145 };
 const STATION_CFGS = [
-  { x: 260, y: 60,  label: 'A', col: [220, 55,  55]  },
-  { x: 205, y: 285, label: 'B', col: [55,  175, 75]  },
-  { x: 315, y: 285, label: 'C', col: [55,  110, 215] },
+  { x: 180, y: 145, label: 'A', col: [220, 55,  55] },
+  { x: 425, y: 90,  label: 'B', col: [55,  175, 75] },
+  { x: 425, y: 200, label: 'C', col: [55,  110, 215] },
 ];
-
-// Stations can only sense each other's transmissions within this radius.
-// B↔C (110 px) < COMM_RADIUS < A↔B (232 px), so B and C hear each other
-// but A is a hidden node from their perspective.
 const COMM_RADIUS = 160;
 
-// Timeline
-const TL_WIN = 20;
-const TL_Y   = 350;
-const TL_ROW = 14;
-const TL_GAP = 4;
-const TL_LX  = 78;
-const TL_W   = 432;
+// Timeline — identical dimensions to WiFi-RTS
+const TL_WIN   = 20;
+const TL_Y     = 257;
+const TL_ANN_H = 16;
+const TL_ROW   = 28;
+const TL_GAP   = 9;
+const TL_LX    = 50;
+const TL_W     = 460;
 
 const MESSAGE_SCHEDULE = [
   { time: 1.0,  stationId: 0 },
-  { time: 5.0,  stationId: 1 },
-  { time: 8.5,  stationId: 2 },
-  { time: 8.9,  stationId: 1 },  // overlaps Big Island → collision
-  { time: 14.0, stationId: 1 },
-  { time: 14.7, stationId: 0 },
-  // { time: 17.5, stationId: 2 },
-];
-const SCHEDULE_PERIOD = 30;
 
-// Single color used for all transmissions in the timeline (shared wireless medium).
+  { time: 6.0,  stationId: 1 },
+  
+  { time: 11,  stationId: 2 },
+  { time: 11.9,  stationId: 1 },
+
+  { time: 19.0, stationId: 0 },
+  { time: 19.5, stationId: 2 },
+  
+  { time: 34.0,  stationId: 1 },
+  { time: 34.1, stationId: 0 },
+  { time: 34.2, stationId: 2 },
+];
+const SCHEDULE_PERIOD = 50;
+
+const ANNOTATIONS = [
+  { label: 'Hidden node (A)', start: 0.9, end: 4 },
+  { label: 'Neighbor node (B)', start: 5.9, end: 9 },
+  { label: 'Both neighbors (B, C)', start: 10.9, end: 17 },
+  { label: 'Hidden and neighbor (A, B) colliding', start: 18.9, end: 32 },
+
+  { label: 'All (A, B, C) colliding', start: 33.9, end: 47 },
+];
+
+
 const TX_COL = [100, 160, 255];
 
 let routerImg, compImg;
@@ -61,13 +71,15 @@ function preload() {
 }
 
 
-// ---- Network ------------------------------------------------------------
+// ---- Network ----------------------------------------------------------------
 
 class Network {
   constructor() { this.transmissions = []; }
 
   register(id, startTime, duration) {
-    let tx = { id, startTime, endTime: startTime + duration, ruined: false };
+    let srcX = id === BASE_ID ? baseStation.x : stations[id].x;
+    let srcY = id === BASE_ID ? baseStation.y : stations[id].y;
+    let tx = { id, startTime, endTime: startTime + duration, ruined: false, srcX, srcY };
     for (let other of this.transmissions) {
       if (other.startTime < tx.endTime && other.endTime > tx.startTime) {
         other.ruined = true;
@@ -78,20 +90,28 @@ class Network {
     return tx;
   }
 
+  isRuinedAt(tx, x, y) {
+    return this.transmissions.some(other => {
+      if (other === tx) return false;
+      if (other.startTime >= tx.endTime || other.endTime <= tx.startTime) return false;
+      return dist(x, y, other.srcX, other.srcY) <= COMM_RADIUS;
+    });
+  }
+
   prune(time) {
-    this.transmissions = this.transmissions.filter(t => t.endTime > time - 0.5);
+    this.transmissions = this.transmissions.filter(t => t.endTime > time - TX_DURATION - 1);
   }
 }
 
 
-// ---- Station ------------------------------------------------------------
-// CSMA/CA state machine:
-//   IDLE → (message, channel free) → TRANSMITTING immediately
-//   IDLE → (message, channel busy) → SENSING
-//   SENSING: wait for channel idle, then → DIFS_WAIT
-//   DIFS_WAIT: count down DIFS; channel goes busy → back to SENSING
-//   BACKOFF: count down random slots (frozen while busy); at 0 → TRANSMITTING
-//   TRANSMITTING → DIFS_WAIT (assume failure; ACK cancels into IDLE; retry doubles CW)
+// ---- Station ----------------------------------------------------------------
+// State machine:
+//   IDLE → message arrives → SENSING or DIFS_WAIT
+//   SENSING → channel free → DIFS_WAIT
+//   DIFS_WAIT → DIFS elapsed, first clean access → TRANSMITTING; after busy/collision → BACKOFF
+//   BACKOFF → slots exhausted → TRANSMITTING
+//   TRANSMITTING → sent → DIFS_WAIT (wait for ACK)
+//   DIFS_WAIT/BACKOFF → ACK received → IDLE
 
 class Station {
   constructor(cfg, id) {
@@ -101,26 +121,34 @@ class Station {
     this.col   = cfg.col;
     this.id    = id;
 
-    this.state         = 'IDLE';
-    this.hasMessage    = false;
-    this.difsTimer     = 0;
-    this.backoffTimer  = 0;
-    this.backoffMax    = 1;    // used for arc display
+    this.state            = 'IDLE';
+    this.hasMessage       = false;
+    this.difsTimer        = 0;
+    this.backoffTimer     = 0;
+    this.backoffMax       = 1;
+    this.backoffPaused    = false;
+    this.needsBackoff     = false;
     this.transmitTimer    = 0;
-    this.transmitDuration = 0;  // initial value of transmitTimer; used for fill-arc fraction
-    this.txAttempts    = 0;    // increments each TX; resets on ACK; drives CW doubling
-    this.contentionWin = CW_MIN;
-    this.networkTx      = null;
-    this.history        = [];
-    this.ackHistory     = [];
-    this.messageRequest = [];  // timestamps when a new message arrives
+    this.transmitDuration = 0;
+    this.txAttempts       = 0;
+    this.contentionWin    = CW_MIN;
+    this.networkTx        = null;
+    this.history          = [];
+    this.ackHistory       = [];
+    this.messageRequest   = [];
   }
 
-  // Close open history entry and open a new one for any tracked state.
   _setState(newState) {
     if (this.history.length > 0) {
       let last = this.history[this.history.length - 1];
-      if (last.end === null) last.end = globalTime;
+      if (last.end === null) {
+        last.end = globalTime;
+        if (this.networkTx && last.state === 'TRANSMITTING') {
+          last.interferers = network.transmissions
+            .filter(tx => tx.id !== this.id && tx.startTime < last.end && tx.endTime > last.start)
+            .map(tx => ({ srcX: tx.srcX, srcY: tx.srcY }));
+        }
+      }
     }
     this.state = newState;
     const tracked = ['SENSING', 'DIFS_WAIT', 'BACKOFF', 'TRANSMITTING'];
@@ -132,8 +160,9 @@ class Station {
   _channelBusy() {
     return network.transmissions.some(tx => {
       if (tx.id === this.id || tx.endTime <= globalTime) return false;
-      let src = stations[tx.id];
-      return dist(this.x, this.y, src.x, src.y) <= COMM_RADIUS;
+      let srcX = tx.id === BASE_ID ? baseStation.x : stations[tx.id].x;
+      let srcY = tx.id === BASE_ID ? baseStation.y : stations[tx.id].y;
+      return dist(this.x, this.y, srcX, srcY) <= COMM_RADIUS;
     });
   }
 
@@ -143,28 +172,43 @@ class Station {
     this.messageRequest.push(globalTime);
     if (this.state === 'IDLE') {
       if (this._channelBusy()) { this._setState('SENSING'); }
-      else                     { this._beginTransmit(); }  // free → no wait needed
+      else { this._retryDIFS(false); }
     }
   }
 
   _enterBackoff() {
-    // Each call after an unacknowledged TX doubles the contention window.
     if (this.txAttempts > 0) {
       this.contentionWin = min(this.contentionWin * 2, CW_MAX);
     }
-    let slots         = floor(random(0, this.contentionWin + 1));
-    this.backoffMax   = this.contentionWin * SLOT_TIME;
-    this.backoffTimer = slots * SLOT_TIME;
+    let slots          = floor(random(0, this.contentionWin + 1));
+    this.backoffMax    = this.contentionWin * SLOT_TIME;
+    this.backoffTimer  = slots * SLOT_TIME;
+    this.backoffPaused = false;
     this._setState('BACKOFF');
   }
+
+  _retryDIFS(needsBackoff = true) { this.needsBackoff = needsBackoff; this._setState('DIFS_WAIT'); this.difsTimer = DIFS; }
 
   _beginTransmit() {
     this.txAttempts++;
     this._setState('TRANSMITTING');
-    let travelTime     = dist(this.x, this.y, baseStation.x, baseStation.y) / PACKET_SPEED;
-    this.networkTx        = network.register(this.id, globalTime, travelTime);
-    this.transmitTimer    = travelTime;
-    this.transmitDuration = travelTime;
+    this.networkTx        = network.register(this.id, globalTime, TX_DURATION);
+    this.transmitTimer    = TX_DURATION;
+    this.transmitDuration = TX_DURATION;
+  }
+
+  noteAckSent() {
+    this.ackHistory.push({ start: globalTime + SIFS, end: null });
+  }
+
+  receiveAck() {
+    if (this.state === 'DIFS_WAIT' || this.state === 'BACKOFF' || this.state === 'SENSING') {
+      closeOpen(this.ackHistory);
+      this.hasMessage    = false;
+      this.txAttempts    = 0;
+      this.contentionWin = CW_MIN;
+      this._setState('IDLE');
+    }
   }
 
   update(dt) {
@@ -173,95 +217,66 @@ class Station {
     this.messageRequest = this.messageRequest.filter(t => t > globalTime - TL_WIN - 2);
 
     if (this.state === 'SENSING') {
-      if (!this._channelBusy()) { this._setState('DIFS_WAIT'); this.difsTimer = DIFS; }
+      if (!this._channelBusy()) { this._retryDIFS(); }
 
     } else if (this.state === 'DIFS_WAIT') {
       if (this._channelBusy()) { this._setState('SENSING'); }
       else {
         this.difsTimer -= dt;
-        if (this.difsTimer <= 0) this._enterBackoff();
+        if (this.difsTimer <= 0) { if (this.needsBackoff) this._enterBackoff(); else this._beginTransmit(); }
       }
 
     } else if (this.state === 'BACKOFF') {
-      if (!this._channelBusy()) {
+      let busy = this._channelBusy();
+      if (busy !== this.backoffPaused) {
+        this.backoffPaused = busy;
+        let last = this.history[this.history.length - 1];
+        if (last && last.end === null) last.end = globalTime;
+        this.history.push({ state: busy ? 'SENSING' : 'BACKOFF', start: globalTime, end: null });
+      }
+      if (!busy) {
         this.backoffTimer -= dt;
         if (this.backoffTimer <= 0) this._beginTransmit();
       }
-      // timer frozen while channel is busy
 
     } else if (this.state === 'TRANSMITTING') {
       this.transmitTimer -= dt;
       if (this.transmitTimer <= 0) {
-        if (!this.networkTx.ruined) baseStation.receivePacket(this);
-        // Assume failure until ACK proves otherwise — immediately start DIFS.
-        this._setState('DIFS_WAIT');
-        this.difsTimer = DIFS;
+        baseStation.receiveData(this);
+        this._retryDIFS();
       }
     }
   }
 
-  noteAckSent() {
-    this.ackHistory.push({ start: globalTime, end: null });
-  }
-
-  receiveAck() {
-    // ACK can arrive during DIFS_WAIT or BACKOFF (the post-TX retry window).
-    if (this.state === 'DIFS_WAIT' || this.state === 'BACKOFF' || this.state === 'SENSING') {
-      let open = this.ackHistory.findLast(s => s.end === null);
-      if (open) open.end = globalTime;
-      this.hasMessage    = false;
-      this.txAttempts    = 0;
-      this.contentionWin = CW_MIN;
-      this._setState('IDLE');  // closes open DIFS_WAIT or BACKOFF history entry
-    }
-  }
-
   draw() {
-    let [r, g, b] = this.col;
+    let transmitting = this.state === 'TRANSMITTING';
 
-    // Communication range circle — always visible, very faint
-    push();
-    noFill(); stroke(180, 180, 200, 80); strokeWeight(1);
-    drawingContext.setLineDash([4, 6]);
-    ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-    drawingContext.setLineDash([]);
-    pop();
+    drawRangeCircle(this.x, this.y);
 
-    // Transmission glow ring — same size as the communication range
-    if (this.state === 'TRANSMITTING') {
-      let [tr, tg, tb] = TX_COL;
-      push();
-      noStroke(); fill(tr, tg, tb, 35);
-      ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-      noFill(); stroke(tr, tg, tb, 100); strokeWeight(1.5);
-      ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-      pop();
+    if (transmitting) {
+      drawGlowRing(this.x, this.y, ...TX_COL);
+      drawArrow(this.x, this.y, baseStation.x, baseStation.y, ...TX_COL);
     }
 
-    // Computer icon (MULTIPLY makes white background invisible)
     blendMode(MULTIPLY);
     imageMode(CENTER);
-    image(compImg, this.x, this.y, 40, 34);
+    image(compImg, this.x, this.y, 33, 28);
     imageMode(CORNER);
     blendMode(BLEND);
 
-    // Label above icon
     push();
     textAlign(CENTER, BOTTOM); textSize(12); noStroke();
     fill(60);
     text(this.label, this.x, this.y - 22);
     pop();
 
-    // Transmission progress arc — fills up as the packet travels (blue)
-    if (this.state === 'TRANSMITTING') {
-      let [tr, tg, tb] = TX_COL;
+    if (transmitting) {
       let frac = max(0, 1 - this.transmitTimer / this.transmitDuration);
-      push(); noFill(); stroke(tr, tg, tb); strokeWeight(2.5);
+      push(); noFill(); stroke(...TX_COL); strokeWeight(2.5);
       arc(this.x, this.y, 54, 54, -HALF_PI, -HALF_PI + TWO_PI * frac);
       pop();
     }
 
-    // Backoff countdown arc — grey when frozen (channel busy), red when counting
     if (this.state === 'BACKOFF') {
       let frac   = max(0, this.backoffTimer / this.backoffMax);
       let frozen = this._channelBusy();
@@ -271,12 +286,11 @@ class Station {
       arc(this.x, this.y, 54, 54, -HALF_PI, -HALF_PI + TWO_PI * frac);
       pop();
     }
-
   }
 }
 
 
-// ---- BaseStation --------------------------------------------------------
+// ---- BaseStation ------------------------------------------------------------
 
 class BaseStation {
   constructor(x, y) {
@@ -286,79 +300,53 @@ class BaseStation {
     this.ackHistory  = [];
   }
 
-  receivePacket(station) {
+  receiveData(station) {
+    if (network.isRuinedAt(station.networkTx, this.x, this.y)) return;
     station.noteAckSent();
-    this.ackHistory.push({ start: globalTime, end: null });
+    this.ackHistory.push({ start: globalTime + SIFS, end: null, stationId: station.id });
     this.pendingAcks.push({ stationId: station.id, timer: ACK_DELAY });
-  }
-
-  // Returns true if the ACK to `station` will be corrupted because another
-  // in-range station is transmitting at the moment the ACK arrives.
-  _ackIsLost(station) {
-    return network.transmissions.some(tx => {
-      if (tx.id === station.id || tx.endTime <= globalTime) return false;
-      return dist(station.x, station.y, stations[tx.id].x, stations[tx.id].y) <= COMM_RADIUS;
-    });
+    network.register(BASE_ID, globalTime + SIFS, ACK_DELAY - SIFS);
   }
 
   update(dt) {
     this.ackHistory = this.ackHistory.filter(s => s.end === null || s.end > globalTime - TL_WIN - 2);
+
     for (let ack of this.pendingAcks) {
       ack.timer -= dt;
       if (ack.timer <= 0) {
-        let open = this.ackHistory.findLast(s => s.end === null);
-        if (open) open.end = globalTime;
+        closeOpen(this.ackHistory);
         let s = stations.find(st => st.id === ack.stationId);
-        if (s) {
-          if (!this._ackIsLost(s)) {
-            s.receiveAck();
-          } else {
-            // ACK collided — close the station's pending ack segment without delivering it.
-            let sAck = s.ackHistory.findLast(seg => seg.end === null);
-            if (sAck) sAck.end = globalTime;
-          }
-        }
+        if (s) s.receiveAck();
       }
     }
     this.pendingAcks = this.pendingAcks.filter(a => a.timer > 0);
   }
 
   draw() {
-    // Green glow when sending ACKs
-    if (this.pendingAcks.length > 0) {
-      push();
-      noStroke(); fill(60, 190, 90, 35);
-      ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-      noFill(); stroke(60, 190, 90, 100); strokeWeight(1.5);
-      ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-      pop();
+    let sendingACK = this.pendingAcks.length > 0;
+
+    if (sendingACK) {
+      drawGlowRing(this.x, this.y, 60, 190, 90);
+      let target = stations.find(st => st.id === this.pendingAcks[0].stationId);
+      if (target) drawArrow(this.x, this.y, target.x, target.y, 60, 190, 90);
     }
 
-    // Communication range circle — matches station style
-    push();
-    noFill(); stroke(180, 180, 200, 80); strokeWeight(1);
-    drawingContext.setLineDash([4, 6]);
-    ellipse(this.x, this.y, COMM_RADIUS * 2, COMM_RADIUS * 2);
-    drawingContext.setLineDash([]);
-    pop();
+    drawRangeCircle(this.x, this.y);
 
-    // Router icon
     blendMode(MULTIPLY);
     imageMode(CENTER);
-    image(routerImg, this.x, this.y, 54, 40);
+    image(routerImg, this.x, this.y, 44, 33);
     imageMode(CORNER);
     blendMode(BLEND);
 
-    // ACK progress arc — fills up as the ACK delay counts down (green)
-    if (this.pendingAcks.length > 0) {
-      let mostProgress = this.pendingAcks.reduce((best, a) => a.timer < best.timer ? a : best);
-      let frac = max(0, 1 - mostProgress.timer / ACK_DELAY);
+    if (sendingACK) {
+      let most = this.pendingAcks.reduce((best, a) => a.timer < best.timer ? a : best);
+      let frac = max(0, 1 - most.timer / (ACK_DELAY - SIFS));
       push(); noFill(); stroke(60, 190, 90); strokeWeight(2.5);
       arc(this.x, this.y, 64, 64, -HALF_PI, -HALF_PI + TWO_PI * frac);
       pop();
     }
 
-    // Label
     push();
     textAlign(CENTER, BOTTOM); textSize(11); noStroke();
     fill(80);
@@ -368,7 +356,50 @@ class BaseStation {
 }
 
 
-// ---- p5 lifecycle -------------------------------------------------------
+function closeOpen(arr) {
+  let open = arr.findLast(s => s.end === null);
+  if (open) open.end = globalTime;
+}
+
+function drawRangeCircle(x, y) {
+  push();
+  noFill(); stroke(180, 180, 200, 80); strokeWeight(1);
+  drawingContext.setLineDash([4, 6]);
+  ellipse(x, y, COMM_RADIUS * 2, COMM_RADIUS * 2);
+  drawingContext.setLineDash([]);
+  pop();
+}
+
+function drawGlowRing(x, y, r, g, b) {
+  push();
+  noStroke(); fill(r, g, b, 35);
+  ellipse(x, y, COMM_RADIUS * 2, COMM_RADIUS * 2);
+  noFill(); stroke(r, g, b, 100); strokeWeight(1.5);
+  ellipse(x, y, COMM_RADIUS * 2, COMM_RADIUS * 2);
+  pop();
+}
+
+function drawArrow(x1, y1, x2, y2, r, g, b) {
+  let dx = x2 - x1, dy = y2 - y1;
+  let d = sqrt(dx * dx + dy * dy);
+  if (d < 1) return;
+  let nx = dx / d, ny = dy / d;
+  let sx = x1 + nx * 33, sy = y1 + ny * 33;
+  let ex = x2 - nx * 30, ey = y2 - ny * 30;
+  push();
+  stroke(r, g, b, 210); strokeWeight(2);
+  line(sx, sy, ex - nx * 11, ey - ny * 11);
+  fill(r, g, b, 210); noStroke();
+  push();
+  translate(ex, ey);
+  rotate(atan2(dy, dx));
+  triangle(0, 0, -13, -5, -13, 5);
+  pop();
+  pop();
+}
+
+
+// ---- p5 lifecycle -----------------------------------------------------------
 
 function initSim() {
   randomSeed(RAND_SEED);
@@ -408,8 +439,7 @@ function draw() {
     let msg      = MESSAGE_SCHEDULE[scheduleIndex];
     let fireTime = schedulePeriodStart + msg.time;
     if (globalTime < fireTime) break;
-    let s = stations[msg.stationId];
-    s.triggerMessage();
+    stations[msg.stationId].triggerMessage();
     scheduleIndex++;
   }
   if (scheduleIndex >= MESSAGE_SCHEDULE.length) {
@@ -417,7 +447,6 @@ function draw() {
     schedulePeriodStart += SCHEDULE_PERIOD;
   }
 
-  // Draw lines first (behind everything), then base, then stations
   for (let s of stations) s.draw();
   baseStation.draw();
 
@@ -426,31 +455,78 @@ function draw() {
   // Legend
   push();
   textSize(10); textAlign(LEFT, CENTER);
-  let lx = width - 148, ly = 10;
+  let lx = 7;
   const lh = 16;
-  fill(100, 160, 255, 160); noStroke(); rect(lx, ly,       10, 10);
-  fill(30); text('Data', lx + 14, ly + 5);
-  fill(60, 190, 90);          noStroke(); rect(lx, ly+lh,   10, 10);
-  fill(30); text('ACK',          lx + 14, ly + lh  + 5);
-  stroke(120); strokeWeight(1.5); line(lx+5, ly+lh*2, lx+5, ly+lh*2+10);
+  const legendBoxH = 106;
+  const legendBoxY = floor((TL_Y - legendBoxH) / 2);
+  let ly = legendBoxY + 6;
+  let [tr, tg, tb] = TX_COL;
+
+  fill(240, 240, 240, 210); stroke(90, 90, 90); strokeWeight(0.8);
+  rect(2, legendBoxY, 90, legendBoxH, 6);
+
+  fill(tr, tg, tb, 160); noStroke(); rect(lx, ly,       10, 10);
+  fill(30); text('Data',        lx + 14, ly + 5);
+  fill(60, 190, 90);      noStroke(); rect(lx, ly+lh,   10, 10);
+  fill(30); text('ACK',         lx + 14, ly + lh   + 5);
+  stroke(0); strokeWeight(1.5); line(lx+5, ly+lh*2, lx+5, ly+lh*2+10);
   fill(30); noStroke(); text('New message', lx + 14, ly + lh*2 + 5);
-  stroke(160); strokeWeight(2); line(lx, ly+lh*3+5, lx+10, ly+lh*3+5);
-  fill(30); noStroke(); text('Sensing',      lx + 14, ly + lh*3 + 5);
+  stroke(0); strokeWeight(2); line(lx, ly+lh*3+5, lx+10, ly+lh*3+5);
+  fill(30); noStroke(); text('Sensing',     lx + 14, ly + lh*3 + 5);
   stroke(230, 140, 30); strokeWeight(2); line(lx, ly+lh*4+5, lx+10, ly+lh*4+5);
-  fill(30); noStroke(); text('DIFS wait',    lx + 14, ly + lh*4 + 5);
+  fill(30); noStroke(); text('DIFS wait',   lx + 14, ly + lh*4 + 5);
   stroke(210, 70, 70);  strokeWeight(2); line(lx, ly+lh*5+5, lx+10, ly+lh*5+5);
-  fill(30); noStroke(); text('Backoff',      lx + 14, ly + lh*5 + 5);
+  fill(30); noStroke(); text('Backoff',     lx + 14, ly + lh*5 + 5);
   pop();
 }
 
 
-// ---- Timeline -----------------------------------------------------------
+// ---- Timeline ---------------------------------------------------------------
+
+function segRuinedAt(seg, x, y) {
+  if (!seg.interferers || seg.interferers.length === 0) return false;
+  return seg.interferers.some(p => dist(x, y, p.srcX, p.srcY) <= COMM_RADIUS);
+}
+
+function segToXRange(seg, tStart, tEnd) {
+  let segEnd = seg.end === null ? globalTime : seg.end;
+  if (segEnd < tStart) return null;
+  let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
+  let x2 = map(min(segEnd,   tEnd),    tStart, tEnd, TL_LX, TL_LX + TL_W);
+  return x2 > x1 ? { x1, x2 } : null;
+}
+
+function drawTLBar(x1, x2, y, h, col, alpha, inProgress) {
+  fill(col[0], col[1], col[2], alpha);
+  stroke(col[0] * 0.6, col[1] * 0.6, col[2] * 0.6);
+  strokeWeight(1);
+  rect(x1, y, x2 - x1, h);
+  if (inProgress) addStripes(x1, y, x2 - x1, h);
+}
+
+function addStripes(x, y, w, h) {
+  if (w <= 0 || h <= 0) return;
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(x, y, w, h);
+  drawingContext.clip();
+  drawingContext.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+  drawingContext.lineWidth = 1.5;
+  drawingContext.beginPath();
+  const step = 5;
+  for (let d = -h; d < w + h; d += step) {
+    drawingContext.moveTo(x + d, y + h);
+    drawingContext.lineTo(x + d + h, y);
+  }
+  drawingContext.stroke();
+  drawingContext.restore();
+}
 
 function drawTimeline() {
   let tEnd   = max(TL_WIN, globalTime);
   let tStart = tEnd - TL_WIN;
   let rows   = stations.length + 1;
-  let totalH = rows * (TL_ROW + TL_GAP) + 18;
+  let totalH = TL_ANN_H + rows * (TL_ROW + TL_GAP) + 18;
 
   push();
   fill(245); noStroke();
@@ -460,127 +536,125 @@ function drawTimeline() {
   pop();
 
   push();
-  textSize(9);
+  textSize(10);
 
   let [tr, tg, tb] = TX_COL;
 
+  // Annotation lane
+  let annLineY = TL_Y + 8;
+  let tickH    = 4;
+  for (let ann of ANNOTATIONS) {
+    if (globalTime < ann.start) continue;
+    if (ann.end < tStart || ann.start > tEnd) continue;
+    let visEnd = min(ann.end, globalTime);
+    let ax1    = map(max(ann.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax2    = map(min(visEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax1raw = map(ann.start, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    stroke(0); strokeWeight(1); noFill();
+    line(ax1, annLineY, ax2, annLineY);
+    if (ann.start >= tStart)                     { line(ax1, annLineY - tickH, ax1, annLineY + tickH); }
+    if (ann.end <= globalTime && visEnd <= tEnd) { line(ax2, annLineY - tickH, ax2, annLineY + tickH); }
+    let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(TL_LX, TL_Y - 12, nowX - TL_LX, TL_ANN_H + 12);
+    drawingContext.clip();
+    fill(0); noStroke(); textAlign(LEFT, BOTTOM);
+    text(ann.label, ax1raw + 2, annLineY - 2);
+    drawingContext.restore();
+  }
+
   for (let i = 0; i < stations.length; i++) {
-    let s   = stations[i];
-    let ry  = TL_Y + i * (TL_ROW + TL_GAP);
-    let [r, g, b] = s.col;
+    let s  = stations[i];
+    let ry = TL_Y + TL_ANN_H + i * (TL_ROW + TL_GAP);
+    let h2 = TL_ROW / 2;
+    let y2 = ry + h2 / 2;
 
     fill(228); noStroke(); rect(TL_LX, ry, TL_W, TL_ROW);
 
-    // Overheard transmissions from in-range stations — half height, centred in row.
+    // Overheard transmissions from in-range stations — half height
     for (let src of stations) {
       if (src === s) continue;
       if (dist(s.x, s.y, src.x, src.y) > COMM_RADIUS) continue;
       for (let seg of src.history) {
         if (seg.state !== 'TRANSMITTING') continue;
-        let segEnd = seg.end === null ? globalTime : seg.end;
-        if (segEnd < tStart) continue;
-        let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-        let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-        if (x2 <= x1) continue;
-        fill(tr, tg, tb, 110); stroke(tr * 0.6, tg * 0.6, tb * 0.6); strokeWeight(1);
-        rect(x1, ry + TL_ROW / 4, x2 - x1, TL_ROW / 2);
+        let r = segToXRange(seg, tStart, tEnd);
+        if (!r) continue;
+        drawTLBar(r.x1, r.x2, y2, h2, [tr, tg, tb], seg.end === null ? 130 : 80, seg.end === null || segRuinedAt(seg, s.x, s.y));
       }
     }
 
-    // Own transmission — full height.
+    // ACK from router — half height
+    for (let seg of baseStation.ackHistory) {
+      let r = segToXRange(seg, tStart, tEnd);
+      if (!r) continue;
+      let a = seg.end === null ? 130 : (seg.stationId === s.id ? 220 : 80);
+      drawTLBar(r.x1, r.x2, y2, h2, [60, 190, 90], a, seg.end === null);
+    }
+
+    // Own transmission — full height
     for (let seg of s.history) {
       if (seg.state !== 'TRANSMITTING') continue;
-      let segEnd = seg.end === null ? globalTime : seg.end;
-      if (segEnd < tStart) continue;
-      let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      fill(tr, tg, tb, 160); stroke(tr * 0.6, tg * 0.6, tb * 0.6); strokeWeight(1);
-      rect(x1, ry, x2 - x1, TL_ROW);
+      let r = segToXRange(seg, tStart, tEnd);
+      if (!r) continue;
+      drawTLBar(r.x1, r.x2, ry, TL_ROW, [tr, tg, tb], seg.end === null ? 130 : 220, false);
     }
 
-    // Pre-TX phases — drawn from history so past durations are visible.
-    // Sensing (waiting for airwaves to clear): grey line
-    // DIFS (mandatory inter-frame gap):        orange line
-    // Backoff (random slot countdown):         red line
+    // State lines
     for (let seg of s.history) {
-      let segEnd = seg.end === null ? globalTime : seg.end;
-      if (segEnd < tStart) continue;
-      let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      noFill();
+      let r = segToXRange(seg, tStart, tEnd);
+      if (!r) continue;
+      let { x1, x2 } = r;
       if (seg.state === 'SENSING') {
-        stroke(160); strokeWeight(1.5);
+        stroke(0); strokeWeight(1.5); noFill();
         line(x1, ry + TL_ROW / 2, x2, ry + TL_ROW / 2);
       } else if (seg.state === 'DIFS_WAIT') {
-        stroke(230, 140, 30); strokeWeight(1.5);
+        stroke(230, 140, 30); strokeWeight(1.5); noFill();
         line(x1, ry + TL_ROW / 2, x2, ry + TL_ROW / 2);
       } else if (seg.state === 'BACKOFF') {
-        stroke(210, 70, 70); strokeWeight(1.5);
+        stroke(210, 70, 70); strokeWeight(1.5); noFill();
         line(x1, ry + TL_ROW / 2, x2, ry + TL_ROW / 2);
       }
     }
 
-    // Message-arrival tick — grey vertical line when the node first wants to send
+    // Message-arrival tick
     for (let t of s.messageRequest) {
       if (t < tStart || t > tEnd) continue;
       let tx = map(t, tStart, tEnd, TL_LX, TL_LX + TL_W);
-      stroke(120); strokeWeight(1.5); noFill();
+      stroke(0); strokeWeight(1.5); noFill();
       line(tx, ry, tx, ry + TL_ROW);
     }
 
-    // ACK from router — all stations hear it (half height)
-    for (let seg of baseStation.ackHistory) {
-      let segEnd = seg.end === null ? globalTime : seg.end;
-      if (segEnd < tStart) continue;
-      let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      fill(60, 190, 90, 110); stroke(30, 140, 60); strokeWeight(1);
-      rect(x1, ry + TL_ROW / 4, x2 - x1, TL_ROW / 2);
-    }
-
-    // ACK — only shown on the station the ACK is addressed to
+    // Own ACK segment — half height
     for (let seg of s.ackHistory) {
-      let segEnd = seg.end === null ? globalTime : seg.end;
-      if (segEnd < tStart) continue;
-      let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      fill(60, 190, 90, 160); stroke(30, 140, 60); strokeWeight(1);
-      rect(x1, ry + TL_ROW / 4, x2 - x1, TL_ROW / 2);
+      let r = segToXRange(seg, tStart, tEnd);
+      if (!r) continue;
+      drawTLBar(r.x1, r.x2, y2, h2, [60, 190, 90], seg.end === null ? 130 : 220, seg.end === null);
     }
 
     fill(60); noStroke(); textAlign(RIGHT, CENTER);
     text(s.label, TL_LX - 4, ry + TL_ROW / 2);
   }
 
-  // Base station row
-  let bry = TL_Y + stations.length * (TL_ROW + TL_GAP);
+  // Router row
+  let bry = TL_Y + TL_ANN_H + stations.length * (TL_ROW + TL_GAP);
   fill(195); noStroke(); rect(TL_LX, bry, TL_W, TL_ROW);
 
+  // Incoming transmissions on router row — half height
   for (let s of stations) {
     for (let seg of s.history) {
       if (seg.state !== 'TRANSMITTING') continue;
-      let segEnd = seg.end === null ? globalTime : seg.end;
-      if (segEnd < tStart) continue;
-      let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      fill(tr, tg, tb, 140); stroke(tr * 0.6, tg * 0.6, tb * 0.6); strokeWeight(1);
-      rect(x1, bry + TL_ROW / 4, x2 - x1, TL_ROW / 2);
+      let r = segToXRange(seg, tStart, tEnd);
+      if (!r) continue;
+      drawTLBar(r.x1, r.x2, bry + TL_ROW / 4, TL_ROW / 2, [tr, tg, tb], seg.end === null ? 130 : 220, seg.end === null || segRuinedAt(seg, baseStation.x, baseStation.y));
     }
   }
 
+  // ACK from router — full height
   for (let seg of baseStation.ackHistory) {
-    let segEnd = seg.end === null ? globalTime : seg.end;
-    if (segEnd < tStart) continue;
-    let x1 = map(max(seg.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-    let x2 = map(min(segEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
-    if (x2 <= x1) continue;
-    fill(60, 190, 90, 160); stroke(30, 140, 60); strokeWeight(1);
-    rect(x1, bry, x2 - x1, TL_ROW);
+    let r = segToXRange(seg, tStart, tEnd);
+    if (!r) continue;
+    drawTLBar(r.x1, r.x2, bry, TL_ROW, [60, 190, 90], seg.end === null ? 130 : 220, seg.end === null);
   }
 
   fill(50); noStroke(); textAlign(RIGHT, CENTER);
@@ -589,7 +663,7 @@ function drawTimeline() {
   // Now-marker
   let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
   stroke(140); strokeWeight(1);
-  line(nowX, TL_Y, nowX, bry + TL_ROW);
+  line(nowX, TL_Y + TL_ANN_H, nowX, bry + TL_ROW);
 
   // Time axis
   let axisY = bry + TL_ROW + 12;
