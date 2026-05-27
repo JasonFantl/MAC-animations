@@ -6,7 +6,7 @@ const PACKET_SPEED     = 110;   // px/s — travel time drives network timing
 const SIFS             = 0.1;   // s — Short Inter-Frame Space before ACK
 const ACK_DELAY        = 0.4;   // s — total: SIFS (0.1) + ACK frame (0.3)
 const RANGE_RADIUS     = 220;   // px — visual radio range circle
-const RAND_SEED        = 42;
+const RAND_SEED        = 43;
 const BACKOFF_MEAN_SEC = 1.5;   // mean of exponential backoff distribution (s)
 
 const MAP_X = 55, MAP_Y = -15;
@@ -29,21 +29,24 @@ const TL_W     = 460;
 const TX_COL = [100, 160, 255];
 
 const MESSAGE_SCHEDULE = [
-  { time:  1.0, stationId: 0 },
+  { time: 1.0,  stationId: 0 },
 
-  { time:  5.0, stationId: 1 },
-  { time:  5.1, stationId: 2 },
-
-  { time: 13.0, stationId: 1 },
-  { time: 13.2, stationId: 0 },
-  { time: 14.0, stationId: 2 },
+  { time: 5.0,  stationId: 1 },
+  
+  { time: 8,  stationId: 2 },
+  { time: 8.9,  stationId: 1 },
+  
+  { time: 21,  stationId: 1 },
+  { time: 21.5, stationId: 0 },
+  { time: 22, stationId: 2 },
 ];
-const SCHEDULE_PERIOD = 35;
+const SCHEDULE_PERIOD = 50;
 
 const ANNOTATIONS = [
-  { label: 'Clean (A)', start: 0.9, end: 3 },
-  { label: 'Collision (B, C)', start: 4.9, end: 11 },
-  { label: 'All three collide', start: 12.9, end: 30.5 },
+  { label: 'Node A', start: 0.9, end: 3 },
+  { label: 'Node B', start: 4.9, end: 6.5 },
+  { label: 'B and C collide', start: 7.9, end: 19 },
+  { label: 'All nodes', start: 20.9, end: 39.5 },
 ];
 
 function expRandom(mean) {
@@ -360,7 +363,7 @@ function draw() {
   textSize(10); textAlign(LEFT, CENTER);
   let lx = 7;
   const lh = 16;
-  const legendBoxH = 60;
+  const legendBoxH = 52;
   const legendBoxY = floor((TL_Y - legendBoxH) / 2);
   let ly = legendBoxY + 6;
   let [tr, tg, tb] = TX_COL;
@@ -369,9 +372,9 @@ function draw() {
   rect(2, legendBoxY, 90, legendBoxH, 6);
 
   fill(tr, tg, tb, 160); noStroke(); rect(lx, ly,           10, 10);
-  fill(30); text('Data',    lx + 14, ly + 5);
+  fill(30); text('Data (λ1)',    lx + 14, ly + 5);
   fill(60, 190, 90);  noStroke(); rect(lx, ly + lh,         10, 10);
-  fill(30); text('ACK',     lx + 14, ly + lh   + 5);
+  fill(30); text('ACK (λ2)',     lx + 14, ly + lh   + 5);
   stroke(210, 70, 70); strokeWeight(2); line(lx, ly + lh*2 + 5, lx + 10, ly + lh*2 + 5);
   fill(30); noStroke(); text('Backoff', lx + 14, ly + lh*2 + 5);
   pop();
