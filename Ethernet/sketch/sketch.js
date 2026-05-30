@@ -16,12 +16,35 @@ const DOT_R        = 4;    // signal dot radius
 const DOT_SP       = 11;   // spacing between signal dots (px)
 
 // Timeline
-const TL_WIN = 18;
-const TL_Y   = 118;
-const TL_ROW = 16;
-const TL_GAP = 5;
-const TL_LX  = 52;
-const TL_W   = 468;
+const TL_WIN   = 18;
+const TL_Y     = 118;
+const TL_ANN_H = 16;
+const TL_ROW   = 28;
+const TL_GAP   = 9;
+const TL_LX    = 50;
+const TL_W     = 460;
+
+
+// B starts at 5.0, C at 5.1 (both within the 0.3s propagation window → collision)
+// C detects B's signal at t=5.0+0.3=5.3 (after 0.2s of transmitting)
+// B detects C's signal at t=5.1+0.3=5.4 (after 0.4s — before TX_DURATION=1.0s is up)
+const MESSAGE_SCHEDULE = [
+  { time: 1.0,  compId: 0 },  // A alone — succeeds
+  { time: 4.5,  compId: 1 },  // B alone — succeeds
+  { time: 8.0,  compId: 1 },  // B starts
+  { time: 8.1,  compId: 2 },  // C starts 0.1s later → collision
+  { time: 17,  compId: 2 },  // C starts 0.1s later → collision
+  { time: 17.2,  compId: 1 },  // C starts 0.1s later → collision
+  { time: 17.3,  compId: 0 },  // C starts 0.1s later → collision
+];
+const SCHEDULE_PERIOD = 40;
+
+const ANNOTATIONS = [
+  { label: 'Node A', start: 0.9, end: 3 },
+  { label: 'Node B', start: 4.4, end: 6.5 },
+  { label: 'B and C collide', start: 7.9, end: 12 },
+  { label: 'All nodes collide', start: 16.9, end: 31 },
+];
 
 const RAND_SEED = 42;
 
@@ -29,23 +52,10 @@ const RAND_SEED = 42;
 // Prop times: A-B = 150/600 = 0.25s, B-C = 150/600 = 0.25s, A-C = 300/600 = 0.5s
 // Round-trip (A↔C) = 1.0s; TX_DURATION=1.2s satisfies Ethernet minimum frame constraint
 const COMP_CFGS = [
-  { x: 120, col: [220, 55,  55],  label: 'A' },
-  { x: 270, col: [55,  175, 75],  label: 'B' },
-  { x: 420, col: [55,  110, 215], label: 'C' },
+  { x: 120, col: [195, 105, 170], label: 'A' },
+  { x: 270, col: [145, 205,  40], label: 'B' },
+  { x: 420, col: [ 40, 185, 185], label: 'C' },
 ];
-
-// B starts at 5.0, C at 5.1 (both within the 0.3s propagation window → collision)
-// C detects B's signal at t=5.0+0.3=5.3 (after 0.2s of transmitting)
-// B detects C's signal at t=5.1+0.3=5.4 (after 0.4s — before TX_DURATION=1.0s is up)
-const MESSAGE_SCHEDULE = [
-  { time: 1.0,  compId: 0 },  // A alone — succeeds
-  { time: 5.0,  compId: 1 },  // B starts
-  { time: 5.1,  compId: 2 },  // C starts 0.1s later → collision
-  { time: 13,  compId: 2 },  // C starts 0.1s later → collision
-  { time: 13.3,  compId: 0 },  // C starts 0.1s later → collision
-  { time: 16,  compId: 1 },  // C starts 0.1s later → collision
-];
-const SCHEDULE_PERIOD = 30;
 
 let signals   = [];
 let computers = [];
@@ -62,6 +72,7 @@ class Signal {
     this.tapX      = tapX;
     this.startTime = t0;
     this.endTime   = null;
+    this.ruined    = false;
     this.col       = col;
     this.yOff      = 0;
   }
@@ -173,6 +184,7 @@ class Computer {
   }
 
   _collide() {
+    this.currentSig.ruined = true;
     this.currentSig.stop(globalTime);
     this.currentSig      = null;
     this.flashTimer      = FLASH_DUR;
@@ -268,6 +280,13 @@ class Computer {
     push(); textAlign(CENTER, BOTTOM); textSize(12); noStroke();
     fill(r, g, b); text(this.label, this.x, COMP_Y - 20); pop();
 
+    // Transmit progress dial (computer's color, fills as frame goes out)
+    if (this.state === 'TRANSMITTING') {
+      let frac = max(0, 1 - this.txTimer / TX_DURATION);
+      push(); noFill(); stroke(r, g, b); strokeWeight(2.5);
+      arc(this.x, COMP_Y, 52, 52, -HALF_PI, -HALF_PI + TWO_PI * frac); pop();
+    }
+
     // Backoff countdown arc (red, empties as backoff expires)
     if (this.state === 'BACKOFF') {
       let frac = max(0, this.backoffTimer / this.backoffMax);
@@ -293,7 +312,7 @@ function initSim() {
 }
 
 function setup() {
-  createCanvas(540, 215);
+  createCanvas(540, 270);
   frameRate(30);
   initSim();
   P5Capture.getInstance().start({ format: 'webm' });
@@ -340,68 +359,115 @@ function draw() {
 }
 
 
+// ── Timeline helpers ──────────────────────────────────────────────────────────
+
+function signalXRange(sig, propDelay, tStart, tEnd) {
+  let arrive = sig.startTime + propDelay;
+  let depart = sig.endTime === null ? Infinity : sig.endTime + propDelay;
+  if (arrive > tEnd || depart < tStart) return null;
+  let x1 = map(max(arrive, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
+  let x2 = map(min(depart, globalTime, tEnd), tStart, tEnd, TL_LX, TL_LX + TL_W);
+  return x2 > x1 ? { x1, x2 } : null;
+}
+
+function drawTLBar(x1, x2, y, h, col, alpha, inProgress) {
+  fill(col[0], col[1], col[2], alpha);
+  stroke(col[0] * 0.6, col[1] * 0.6, col[2] * 0.6);
+  strokeWeight(1);
+  rect(x1, y, x2 - x1, h);
+  if (inProgress) addStripes(x1, y, x2 - x1, h);
+}
+
+function addStripes(x, y, w, h) {
+  if (w <= 0 || h <= 0) return;
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(x, y, w, h);
+  drawingContext.clip();
+  drawingContext.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+  drawingContext.lineWidth = 1.5;
+  drawingContext.beginPath();
+  const step = 5;
+  for (let d = -h; d < w + h; d += step) {
+    drawingContext.moveTo(x + d, y + h);
+    drawingContext.lineTo(x + d + h, y);
+  }
+  drawingContext.stroke();
+  drawingContext.restore();
+}
+
+
 // ── Timeline ──────────────────────────────────────────────────────────────────
-// Each row shows one computer's view of the wire.
-// Top half of row: signals this computer is transmitting (own color).
-// Bottom half: signals arriving from other computers (sender's color, propagation-delayed).
-// Red dashed line: backoff period.
 
 function drawTimeline() {
   let tEnd   = max(TL_WIN, globalTime);
   let tStart = tEnd - TL_WIN;
   let rows   = computers.length;
 
-  // Background panel
   push();
   fill(245); noStroke();
-  rect(0, TL_Y - 8, width, rows * (TL_ROW + TL_GAP) + 26);
+  rect(0, TL_Y - 8, width, height - (TL_Y - 8));
   stroke(190); strokeWeight(1);
   line(0, TL_Y - 9, width, TL_Y - 9);
   pop();
 
-  push(); textSize(9);
+  push();
+  textSize(10);
+
+  // Annotation lane
+  let annLineY = TL_Y + 8;
+  let tickH    = 4;
+  for (let ann of ANNOTATIONS) {
+    if (globalTime < ann.start) continue;
+    if (ann.end < tStart || ann.start > tEnd) continue;
+    let visEnd = min(ann.end, globalTime);
+    let ax1    = map(max(ann.start, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax2    = map(min(visEnd, tEnd),      tStart, tEnd, TL_LX, TL_LX + TL_W);
+    let ax1raw = map(ann.start, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    stroke(0); strokeWeight(1); noFill();
+    line(ax1, annLineY, ax2, annLineY);
+    if (ann.start >= tStart)                     { line(ax1, annLineY - tickH, ax1, annLineY + tickH); }
+    if (ann.end <= globalTime && visEnd <= tEnd) { line(ax2, annLineY - tickH, ax2, annLineY + tickH); }
+    let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(TL_LX, TL_Y - 12, nowX - TL_LX, TL_ANN_H + 12);
+    drawingContext.clip();
+    fill(0); noStroke(); textAlign(LEFT, BOTTOM);
+    text(ann.label, ax1raw + 2, annLineY - 2);
+    drawingContext.restore();
+  }
 
   for (let i = 0; i < rows; i++) {
-    let c  = computers[i];
-    let ry = TL_Y + i * (TL_ROW + TL_GAP);
+    let c      = computers[i];
+    let ry     = TL_Y + TL_ANN_H + i * (TL_ROW + TL_GAP);
     let [r, g, b] = c.col;
+    let h2     = TL_ROW / 2;
+    let y2     = ry + h2 / 2;
 
     fill(228); noStroke(); rect(TL_LX, ry, TL_W, TL_ROW);
 
-    // Own transmissions: full-height semi-transparent bar
-    for (let s of signals) {
-      if (s.sourceId !== i) continue;
-      let arrive = s.startTime;
-      let depart = s.endTime ?? Infinity;
-      if (depart < tStart || arrive > tEnd) continue;
-      let x1 = map(max(arrive, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = depart === Infinity
-        ? map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W)
-        : map(min(depart, tEnd), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      let [sr, sg, sb] = s.col;
-      fill(sr, sg, sb, 130); stroke(sr * 0.7, sg * 0.7, sb * 0.7); strokeWeight(1);
-      rect(x1, ry, x2 - x1, TL_ROW);
-    }
-
-    // Received signals: half-height bar centered in the row (with propagation delay).
-    // Right edge is capped at globalTime so the bar grows in real-time rather than
-    // jumping forward by the propagation delay when the sender stops.
+    // Received signals — half height, sender color, stripes until last bit arrives or if ruined
     for (let s of signals) {
       if (s.sourceId === i) continue;
-      let prop    = abs(c.x - s.tapX) / SIGNAL_SPEED;
-      let arrive  = s.startTime + prop;
-      let depart  = s.endTime === null ? Infinity : s.endTime + prop;
-      if (depart < tStart || arrive > tEnd) continue;
-      let x1 = map(max(arrive, tStart), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      let x2 = map(min(depart, globalTime, tEnd), tStart, tEnd, TL_LX, TL_LX + TL_W);
-      if (x2 <= x1) continue;
-      let [sr, sg, sb] = s.col;
-      fill(sr, sg, sb, 160); stroke(sr * 0.7, sg * 0.7, sb * 0.7); strokeWeight(1);
-      rect(x1, ry + TL_ROW / 4, x2 - x1, TL_ROW / 2);
+      let prop   = abs(c.x - s.tapX) / SIGNAL_SPEED;
+      let xr     = signalXRange(s, prop, tStart, tEnd);
+      if (!xr) continue;
+      let depart = s.endTime === null ? Infinity : s.endTime + prop;
+      let bad    = s.ruined || globalTime < depart;
+      drawTLBar(xr.x1, xr.x2, y2, h2, s.col, bad ? 130 : 160, bad);
     }
 
-    // Backoff: red line drawn on top of all bars
+    // Own transmission — full height, stripes if in-progress or ruined
+    for (let s of signals) {
+      if (s.sourceId !== i) continue;
+      let xr = signalXRange(s, 0, tStart, tEnd);
+      if (!xr) continue;
+      let bad = s.endTime === null || s.ruined;
+      drawTLBar(xr.x1, xr.x2, ry, TL_ROW, s.col, bad ? 130 : 220, bad);
+    }
+
+    // Backoff line
     for (let bk of c.backoffHist) {
       let bEnd = bk.end === null ? globalTime : bk.end;
       if (bEnd < tStart || bk.start > tEnd) continue;
@@ -412,12 +478,12 @@ function drawTimeline() {
       line(x1, ry + TL_ROW / 2, x2, ry + TL_ROW / 2);
     }
 
-    // Collision X markers — drawn on top of all bars
+    // Collision X markers
     for (let ct of c.collisionHist) {
       if (ct < tStart || ct > tEnd) continue;
       let cx = map(ct, tStart, tEnd, TL_LX, TL_LX + TL_W);
       let cy = ry + TL_ROW / 2;
-      let arm = 3.5;
+      let arm = 4;
       stroke(210, 40, 40); strokeWeight(2); noFill();
       line(cx - arm, cy - arm, cx + arm, cy + arm);
       line(cx + arm, cy - arm, cx - arm, cy + arm);
@@ -431,10 +497,10 @@ function drawTimeline() {
   // Now-marker
   let nowX = map(globalTime, tStart, tEnd, TL_LX, TL_LX + TL_W);
   stroke(140); strokeWeight(1);
-  line(nowX, TL_Y, nowX, TL_Y + rows * (TL_ROW + TL_GAP) - TL_GAP);
+  line(nowX, TL_Y + TL_ANN_H, nowX, TL_Y + TL_ANN_H + rows * (TL_ROW + TL_GAP) - TL_GAP);
 
-  // Time axis ticks every 5s
-  let axY = TL_Y + rows * (TL_ROW + TL_GAP) - TL_GAP + 14;
+  // Time axis
+  let axY = TL_Y + TL_ANN_H + rows * (TL_ROW + TL_GAP) - TL_GAP + 14;
   stroke(160); strokeWeight(1);
   line(TL_LX, axY - 8, TL_LX + TL_W, axY - 8);
   noStroke(); fill(80); textAlign(CENTER, TOP);
