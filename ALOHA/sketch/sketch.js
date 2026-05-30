@@ -425,7 +425,7 @@ function drawTimeline() {
 
   push();
   fill(245); noStroke();
-  rect(0, TL_Y - 8, width, totalH + 8);
+  rect(0, TL_Y - 8, width, height - (TL_Y - 8));
   stroke(190); strokeWeight(1);
   line(0, TL_Y - 9, width, TL_Y - 9);
   pop();

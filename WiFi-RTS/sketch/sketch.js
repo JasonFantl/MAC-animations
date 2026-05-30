@@ -53,12 +53,12 @@ const MESSAGE_SCHEDULE = [
 const SCHEDULE_PERIOD = 50;
 
 const ANNOTATIONS = [
-  { label: 'Hidden node (A)', start: 0.9, end: 5 },
-  { label: 'Neighbor node (B)', start: 6.9, end: 11 },
-  { label: 'Both neighbors (B, C)', start: 12.9, end: 21 },
-  { label: 'Hidden and neighbor (A, B)', start: 22.9, end: 31 },
+  { label: 'Node A (hidden)', start: 0.9, end: 5 },
+  { label: 'Node B (neighbor)', start: 6.9, end: 11 },
+  { label: 'B and C (neighbors) avoid collision', start: 12.9, end: 21 },
+  { label: 'A and B (hidden) avoid collision', start: 22.9, end: 31 },
 
-  { label: 'All (A, B, C) colliding', start: 32.9, end: 46 },
+  { label: 'All nodes colliding', start: 32.9, end: 46 },
 ];
 
 const TX_COL  = [100, 160, 255]; // data — blue
